@@ -1,0 +1,162 @@
+# ──────────────────────────────────────────────────────────────────────────
+# docker-compose.yml
+#
+# Brings up a tiny self-sovereign-identity (SSI) stack made of 3 containers:
+#
+#   postgres          → durable storage for the agent's wallet (keys, DIDs,
+#                        connection records — everything ACA-Py needs to
+#                        remember between restarts)
+#   did-agent         → ACA-Py (Aries Cloud Agent Python), the actual SSI
+#                        agent that speaks the DIDComm protocol
+#   webhook-receiver  → a small Node/Express app that ACA-Py "calls back"
+#                        whenever something happens (new connection, new
+#                        message, etc.) so we can see it on a dashboard
+#
+# All three talk to each other over a private Docker network using their
+# service name as a hostname (e.g. "postgres", "webhook-receiver") — that's
+# why none of them need to know a real IP address.
+#
+# Run everything with:  docker compose up --build
+# ──────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── postgres ──────────────────────────────────────────────────────────
+  # ACA-Py can store its wallet in a local file (SQLite) or in Postgres.
+  # We use Postgres here because it's the production-grade option and it
+  # teaches you the real wiring (storage config/creds) you'd use later.
+  postgres:
+    image: postgres:16-alpine        # official, small Postgres image
+    restart: unless-stopped           # restart automatically unless we stop it ourselves
+    environment:
+      # These three are read by the official postgres image's entrypoint
+      # script on first boot to create the user/db. Values come from .env.
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      # Bind-mount: store the actual database files on the host machine
+      # (./docker/volumes/postgres) so data survives `docker compose down`.
+      # Without this, deleting the container would wipe the whole wallet.
+      - ./docker/volumes/postgres:/var/lib/postgresql/data
+    healthcheck:
+      # Lets other services (did-agent) wait until Postgres is actually
+      # ready to accept connections, not just "container started".
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [ssi-net]
+    # Intentionally NOT publishing 5432 to the host. Only containers on
+    # ssi-net can reach Postgres — there's no reason your laptop needs to
+    # connect to it directly. Uncomment below if you want to inspect it
+    # with a local psql client / GUI tool:
+    # ports:
+    #   - "5432:5432"
+
+  # ── did-agent ─────────────────────────────────────────────────────────
+  # The actual ACA-Py agent. It exposes two HTTP ports:
+  #   8020 = "inbound" port — where OTHER agents send it DIDComm messages
+  #   8021 = "admin" port   — the local REST API you use to control it
+  #                           (create invitations, list connections, etc.)
+  did-agent:
+    build:
+      context: ./did-agent       # folder containing the Dockerfile below
+      dockerfile: Dockerfile
+    image: my-ssi-did-agent:local
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy   # don't even try to start until Postgres is ready
+      webhook-receiver:
+        condition: service_started   # nice-to-have ordering, not strictly required
+    ports:
+      - "${ACAPY_INBOUND_PORT}:8020"   # other agents/peers reach DIDComm here
+      - "${ACAPY_ADMIN_PORT}:8021"     # you reach the admin API / Swagger UI here
+    volumes:
+      # ACA-Py still keeps some local files even though wallet *records*
+      # live in Postgres (e.g. its internal cache). Persist that folder
+      # so it isn't rebuilt from scratch on every restart.
+      - ./docker/volumes/wallet:/home/aries/.aries_cloudagent
+    networks: [ssi-net]
+    env_file: [.env]   # gives the container access to every var below too
+    healthcheck:
+      # /status/live is a no-auth ACA-Py endpoint made for exactly this.
+      test: ["CMD-SHELL", "curl -f http://localhost:8021/status/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    # `command:` is the list of arguments passed to the aca-py CLI.
+    # We spell every flag out explicitly (instead of hiding them behind
+    # env-var auto-mapping) so it's obvious what each one does.
+    #
+    # This is written as a YAML list (one argument per line) rather than
+    # a single string. Compose parses a plain string with shell-like
+    # word-splitting, which silently strips the double quotes out of the
+    # JSON values below (breaking --wallet-storage-config/-creds). A list
+    # passes each item through to the container verbatim — no quoting
+    # surprises.
+    command:
+      - start
+      - --inbound-transport
+      - http
+      - 0.0.0.0
+      - "8020"
+      - --outbound-transport
+      - http
+      - --endpoint
+      - ${ACAPY_ENDPOINT}
+      - --admin
+      - 0.0.0.0
+      - "8021"
+      - --admin-api-key
+      - ${ACAPY_ADMIN_API_KEY}
+      - --label
+      - ${ACAPY_LABEL}
+      - --log-level
+      - ${ACAPY_LOG_LEVEL}
+      - --no-ledger
+      - --wallet-type
+      - askar
+      - --wallet-name
+      - ${ACAPY_WALLET_NAME}
+      - --wallet-key
+      - ${ACAPY_WALLET_KEY}
+      - --wallet-storage-type
+      - postgres_storage
+      - --wallet-storage-config
+      - '{"url":"postgres:5432","max_connections":10}'
+      - --wallet-storage-creds
+      - '{"account":"${POSTGRES_USER}","password":"${POSTGRES_PASSWORD}","admin_account":"${POSTGRES_USER}","admin_password":"${POSTGRES_PASSWORD}"}'
+      - --auto-provision
+      - --webhook-url
+      - http://webhook-receiver:${WEBHOOK_PORT}/webhook
+      - --auto-accept-invites
+      - --auto-accept-requests
+
+  # ── webhook-receiver ──────────────────────────────────────────────────
+  # ACA-Py doesn't have a built-in UI for "what just happened". Instead it
+  # POSTs an event to our --webhook-url above every time something occurs
+  # (new connection, new message, etc). This service just listens for
+  # those POSTs and displays them on a simple web dashboard.
+  webhook-receiver:
+    build:
+      context: ./webhook-receiver
+      dockerfile: Dockerfile
+    image: my-ssi-webhook-receiver:local
+    restart: unless-stopped
+    environment:
+      PORT: ${WEBHOOK_PORT}
+    ports:
+      - "${WEBHOOK_PORT}:${WEBHOOK_PORT}"   # open http://localhost:<port> for the dashboard
+    networks: [ssi-net]
+
+# ── networks ───────────────────────────────────────────────────────────
+# A single private bridge network. Every service on it can resolve the
+# others by service name (e.g. did-agent can reach "postgres" and
+# "webhook-receiver" as hostnames) without any manual IP configuration.
+networks:
+  ssi-net:
+    driver: bridge

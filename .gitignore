@@ -1,0 +1,16 @@
+# Runtime data written by the containers — not source, shouldn't be committed.
+#
+# docker/volumes/postgres/ is intentionally left with NO tracked files at
+# all (not even .gitkeep) — Postgres's initdb refuses to initialize a data
+# directory that contains any file, dotfiles included, when it's a direct
+# bind-mount target. Docker creates the host folder automatically on first
+# `docker compose up`, so an empty git-ignored directory is fine.
+docker/volumes/postgres/*
+docker/volumes/wallet/*
+!docker/volumes/wallet/.gitkeep
+
+node_modules/
+.DS_Store
+
+# Real secrets/config — copy .env.example to .env and fill in your own values.
+.env

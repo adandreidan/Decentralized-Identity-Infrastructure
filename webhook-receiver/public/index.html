@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>ACA-Py Webhook Dashboard</title>
+<style>
+  /* Dark, low-distraction theme — this is a debugging tool, not a product UI */
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, sans-serif;
+    background: #111317;
+    color: #e6e6e6;
+  }
+  header {
+    padding: 14px 20px;
+    background: #1b1e25;
+    border-bottom: 1px solid #2a2e38;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  header h1 { font-size: 1rem; margin: 0; color: #9b8cff; }
+  #count { font-size: 0.8rem; color: #9aa0ad; }
+  #clear {
+    margin-left: auto;
+    background: #2a2e38;
+    color: #e6e6e6;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  #clear:hover { background: #3a3f4d; }
+  main { max-width: 900px; margin: 0 auto; padding: 20px; }
+  .event {
+    background: #1b1e25;
+    border: 1px solid #2a2e38;
+    border-radius: 8px;
+    margin-bottom: 10px;
+  }
+  .event-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    cursor: pointer;
+  }
+  .topic {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: #2a2e38;
+    color: #9b8cff;
+  }
+  .time { margin-left: auto; font-size: 0.75rem; color: #6b7280; }
+  .event-body {
+    display: none;
+    padding: 0 14px 14px 14px;
+  }
+  .event-body.open { display: block; }
+  .event-body pre {
+    background: #0d0f13;
+    border: 1px solid #2a2e38;
+    border-radius: 6px;
+    padding: 10px;
+    font-size: 0.8rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: #c8ccd4;
+  }
+  #empty { text-align: center; color: #6b7280; margin-top: 60px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ACA-Py Webhook Dashboard</h1>
+  <span id="count">0 events</span>
+  <button id="clear">Clear</button>
+</header>
+
+<main>
+  <p id="empty">No events yet — interact with the agent's admin API to generate some.</p>
+  <div id="list"></div>
+</main>
+
+<script>
+  // Poll the server every 2 seconds and re-render the full list.
+  // For a small, low-volume debugging dashboard like this, polling is
+  // simpler and more robust than maintaining a WebSocket connection —
+  // there's no meaningful latency cost at this scale.
+  const POLL_MS = 2000;
+
+  // Track which event cards are expanded so re-rendering doesn't
+  // collapse a card you currently have open.
+  const openIds = new Set();
+
+  async function poll() {
+    const res = await fetch('/api/events');
+    const events = await res.json();
+    render(events);
+  }
+
+  function render(events) {
+    document.getElementById('count').textContent =
+      events.length === 1 ? '1 event' : `${events.length} events`;
+    document.getElementById('empty').style.display =
+      events.length === 0 ? 'block' : 'none';
+
+    const list = document.getElementById('list');
+    list.innerHTML = events.map(eventToHtml).join('');
+  }
+
+  function eventToHtml(event) {
+    const isOpen = openIds.has(event.id);
+    const time = new Date(event.receivedAt).toLocaleTimeString();
+    const json = escapeHtml(JSON.stringify(event.payload, null, 2));
+
+    return `
+      <div class="event">
+        <div class="event-head" onclick="toggle(${event.id})">
+          <span class="topic">${escapeHtml(event.topic)}</span>
+          <span class="time">${time}</span>
+        </div>
+        <div class="event-body ${isOpen ? 'open' : ''}">
+          <pre>${json}</pre>
+        </div>
+      </div>
+    `;
+  }
+
+  function toggle(id) {
+    if (openIds.has(id)) openIds.delete(id);
+    else openIds.add(id);
+    poll(); // re-render immediately to reflect the toggle
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  document.getElementById('clear').addEventListener('click', async () => {
+    await fetch('/api/events', { method: 'DELETE' });
+    openIds.clear();
+    poll();
+  });
+
+  poll();
+  setInterval(poll, POLL_MS);
+</script>
+
+</body>
+</html>

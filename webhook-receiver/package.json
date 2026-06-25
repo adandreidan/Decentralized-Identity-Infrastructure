@@ -1,0 +1,13 @@
+{
+  "name": "webhook-receiver",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Receives ACA-Py webhook events and displays them on a live dashboard",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
